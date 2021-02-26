@@ -3,6 +3,7 @@
 
 
 // gcloud functions deploy newFile --runtime nodejs12 --trigger-resource photosub.appspot.com --trigger-event google.storage.object.finalize
+// gcloud functions deploy deleteFile --runtime nodejs12 --trigger-resource photosub.appspot.com --trigger-event google.storage.object.delete
 // gsutil cp DSC_1622.jpg gs://photosub.appspot.com/2014/misool
 // file.name = "2014/misool/DSC_1378.jpg" ==> filepath
 // file.eventType = "google.storage.object.finalize"
@@ -14,6 +15,22 @@ const {Storage} = require('@google-cloud/storage');
 const path = require('path');
 const axios = require("axios");
 const exifr = require('exifr');
+
+const imageServiceApiUrl = "https://api-photosub-dot-photosub.ew.r.appspot.com/image";
+
+exports.deleteFile = (file, context) => {
+    const fileFullPath = file.name;
+    const filePathProps = path.parse(fileFullPath);
+    const fileItemProps = {
+        name: filePathProps.base,
+        path: filePathProps.dir
+    }
+    axios.delete(imageServiceApiUrl, { data: fileItemProps }).then(response => {
+        console.log(`${fileFullPath} has been removed.`);
+    }).catch(error => {
+        console.error(`Failed to delete image ${fileFullPath}.`, error);
+    });
+}
 
 exports.newFile = (file, context) => {
     const contentType = file.contentType; // File content type
@@ -74,14 +91,14 @@ exports.newFile = (file, context) => {
 
         // Send post request api-photosub/image
         // Invoke API.
-        axios.post("https://api-photosub-dot-photosub.ew.r.appspot.com/image", newImageItem).then(response => {
-            console.log(response);
+        axios.post(imageServiceApiUrl, newImageItem).then(response => {
+            console.log(`${file.name} has been inserted.`);
         }).catch(error => {
-            console.error("Failed to insert new image.", error);
+            console.error(`Failed to insert new image ${file.name}.`, error);
         });
 
     }).catch(error => {
-        console.error(`Failed to download and analyze new image ${file.name}`, error);
+        console.error(`Failed to download and analyze new image ${file.name}.`, error);
     });
 };
 
