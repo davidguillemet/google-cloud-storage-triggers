@@ -2,8 +2,8 @@
 // --trigger-event google.storage.object.delete
 
 
-// gcloud functions deploy newFile --runtime nodejs12 --trigger-resource photosub.appspot.com --trigger-event google.storage.object.finalize
-// gcloud functions deploy deleteFile --runtime nodejs12 --trigger-resource photosub.appspot.com --trigger-event google.storage.object.delete
+// gcloud functions deploy newFile --env-vars-file .env.yaml --runtime nodejs12 --trigger-resource photosub.appspot.com --trigger-event google.storage.object.finalize
+// gcloud functions deploy deleteFile --env-vars-file .env.yaml --runtime nodejs12 --trigger-resource photosub.appspot.com --trigger-event google.storage.object.delete
 // gsutil cp DSC_1622.jpg gs://photosub.appspot.com/2014/misool
 // file.name = "2014/misool/DSC_1378.jpg" ==> filepath
 // file.eventType = "google.storage.object.finalize"
@@ -12,94 +12,104 @@
 // Trigger Sample: https://firebase.google.com/docs/functions/gcp-storage-events
 
 const {Storage} = require('@google-cloud/storage');
+
 const path = require('path');
 const axios = require("axios");
 const exifr = require('exifr');
 
-const imageServiceApiUrl = "https://api-photosub-dot-photosub.ew.r.appspot.com/image";
+const logger = require('./logger');
 
-exports.deleteFile = (file, context) => {
+exports.deleteFile = async (file, context) => {
     const fileFullPath = file.name;
     const filePathProps = path.parse(fileFullPath);
     const fileItemProps = {
         name: filePathProps.base,
         path: filePathProps.dir
     }
-    axios.delete(imageServiceApiUrl, { data: fileItemProps }).then(response => {
-        console.log(`${fileFullPath} has been removed.`);
-    }).catch(error => {
-        console.error(`Failed to delete image ${fileFullPath}.`, error);
-    });
+    try {
+        await axios.delete(process.env.IMAGE_API_URL, { data: fileItemProps });
+        logger.info(`${fileFullPath} has been removed.`);
+    } catch(error) {
+        logger.error(`Failed to delete image ${fileFullPath}.`, error);
+    }
 }
 
-exports.newFile = (file, context) => {
+exports.newFile = async (file, context) => {
     const contentType = file.contentType; // File content type
     // Exit if this is triggered on a file that is not an image.
     if (!contentType.startsWith('image/')) {
         return console.log(`${file.name} is not an image.`);
     }
     
-    console.log(`  Bucket: ${file.bucket}`);
-    console.log(`  File: ${file.name}`);
-
     const storage = new Storage();
     const bucket = storage.bucket(file.bucket);
-    const fileObject = bucket.file(file.name);    
-    fileObject.download().then(function(data) {
-        const fileContent = data[0];
-        return exifr.parse(fileContent, { xmp: true, tiff: false, ifd0: false, gps: false, exif: false });
-    }).then((xmp) => {
+    const fileObject = bucket.file(file.name);
+    let fileContent = null;
+    try {
+        const data = await fileObject.download();
+        fileContent = data[0];
+    } catch (error) {
+        logger.error(`Failed to download image ${file.name}.`, error);
+        return;
+    }
 
-        let imageTitle = null;
-        let imageDescription = null;
-		let imageTags = null;
-		let imageCaption = null;
-		let captionTags = null;
+    let xmp = null
 
-		if (xmp !== null && xmp !== undefined) {
-			
-			// Update the intial gallery image
-			imageTitle = getObjectProperty(xmp.title, "value", "");
-			imageDescription = getObjectProperty(xmp.description, "value", "");
-			imageTags = getObjectProperty(xmp, "subject", null);
+    try {
+        xmp = await exifr.parse(fileContent, { xmp: true, tiff: false, ifd0: false, gps: false, exif: false });
+    } catch (error) {
+        logger.error(`Failed to extract exif from ${file.name}.`, error);
+        return;
+    }
 
-			const captionSingleTerms = [];
-			const captionComposedTerms = [];
-			analyzeDescription(imageTitle, captionSingleTerms, captionComposedTerms);
-			analyzeDescription(imageDescription, captionSingleTerms, captionComposedTerms);
-			if (captionSingleTerms.length > 0 && captionComposedTerms.length > 0) {
-				// Create the caption string by keeping duplicates to keep term order untouched
-				imageCaption = " " + captionComposedTerms.join(" ") + " ";
-				// remove duplicates for tags array using a Set
-				const singleAndComposedTerms = captionSingleTerms.concat(captionComposedTerms);
-				const tagSet = new Set(singleAndComposedTerms);
-				captionTags = Array.from(tagSet);
-			}
-		}
 
-        const filePathProps = path.parse(file.name);
+    if (xmp === null || xmp === undefined) {
+        logger.error(`Exif information for ${file.name} is undefined.`);
+        return;
+    }
+        
+    // Update the intial gallery image
+    const imageTitle = getObjectProperty(xmp.title, "value", "");
+    const imageDescription = getObjectProperty(xmp.description, "value", "");
+    const imageTags = getObjectProperty(xmp, "subject", null);
 
-		const newImageItem = {
-            name: filePathProps.base,
-            path: filePathProps.dir,
-			title: imageTitle,
-			description: imageDescription,
-			tags: imageTags,
-			caption: imageCaption,
-			captionTags: captionTags
-		};
+    let imageCaption = null;
+    let captionTags = null;
 
-        // Send post request api-photosub/image
-        // Invoke API.
-        axios.post(imageServiceApiUrl, newImageItem).then(response => {
-            console.log(`${file.name} has been inserted.`);
-        }).catch(error => {
-            console.error(`Failed to insert new image ${file.name}.`, error);
-        });
+    const captionSingleTerms = [];
+    const captionComposedTerms = [];
+    analyzeDescription(imageTitle, captionSingleTerms, captionComposedTerms);
+    analyzeDescription(imageDescription, captionSingleTerms, captionComposedTerms);
+    if (captionSingleTerms.length > 0 && captionComposedTerms.length > 0) {
+        // Create the caption string by keeping duplicates to keep term order untouched
+        imageCaption = " " + captionComposedTerms.join(" ") + " ";
+        // remove duplicates for tags array using a Set
+        const singleAndComposedTerms = captionSingleTerms.concat(captionComposedTerms);
+        const tagSet = new Set(singleAndComposedTerms);
+        captionTags = Array.from(tagSet);
+    }
 
-    }).catch(error => {
-        console.error(`Failed to download and analyze new image ${file.name}.`, error);
-    });
+    const filePathProps = path.parse(file.name);
+
+    const newImageItem = {
+        name: filePathProps.base,
+        path: filePathProps.dir,
+        title: imageTitle,
+        description: imageDescription,
+        tags: imageTags,
+        caption: imageCaption,
+        captionTags: captionTags
+    };
+
+    logger.info(`Successfuly build image details for ${file.name} in Finalize GCS trigger.`, newImageItem);
+
+    // Send post request api-photosub/image to insert a new image item
+    try {
+        const response = await axios.post(process.env.IMAGE_API_URL, newImageItem);
+        logger.info(`${file.name} has been inserted.`);
+    } catch(error) {
+        logger.error(`Failed to insert new image ${file.name}.`, error);
+    }
 };
 
 function getObjectProperty(object, propertyName, defaultValue) {
